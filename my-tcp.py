@@ -1,12 +1,12 @@
 import socket
 import random
 import struct
-import typing
 import array
+import typing
 
 LOCALHOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8081
-BUFF_SIZE = 1080
+BUFF_SIZE = 1024
 
 CLIENT_PORT_LOWER = 2 ** 15
 CLIENT_PORT_HIGHER = 2 ** 16
@@ -19,6 +19,32 @@ PSH = 0b00001000
 RST = 0b00000100
 SYN = 0b00000010
 FIN = 0b00000001
+
+
+def flags_to_str(flags: int) -> str:
+    res = ''
+    if flags & CWR:
+        res += 'CWR,'
+    if flags & ECE:
+        res += 'ECE,'
+    if flags & URG:
+        res += 'URG,'
+    if flags & ACK:
+        res += 'ACK,'
+    if flags & PSH:
+        res += 'PSH,'
+    if flags & RST:
+        res += 'RST,'
+    if flags & SYN:
+        res += 'SYN,'
+    if flags & FIN:
+        res += 'FIN,'
+
+    if res != '':
+        return res[:-1]
+
+    return res
+
 
 def checksum(data: bytes) -> int:
     """ 
@@ -41,15 +67,15 @@ def build_pseudo_header(src_ip: str, dst_ip: str, size: int):
                        0, socket.IPPROTO_TCP, size)
 
 def pack_tcp_segment(src_ip: str, dst_ip: str,
-                    src_port: int, dst_port: int, sec_num: int, 
-                    ack_num: int, flags: int, window: int,
-                    data: str) -> bytes:
+                     src_port: int, dst_port: int, 
+                     seq_num: int, ack_num: int, 
+                     flags: int, window: int, data: str) -> bytes:
     """
     Construye un segmento de TCP acorde a la especificación, sin incluir opciones.
     """
-    header_no_checksum = struct.pack("!HHIIBBHHH",
+    header_no_checksum = struct.pack("!HHIIBBH",
                                      src_port, dst_port,
-                                     sec_num,
+                                     seq_num,
                                      ack_num,
                                      (5 << 4), flags, window)
 
@@ -65,49 +91,112 @@ def pack_tcp_segment(src_ip: str, dst_ip: str,
 
     return header + byte_data
 
+class TCPSegment(typing.NamedTuple):
+    src_port: int
+    dst_port: int
+    seq_num: int
+    ack_num: int
+    flags: int
+    window: int
+    data: str
 
-def unpack_tcp_segment(src_ip: str, dst_ip:str, segment: bytes)\
-                       -> tuple[int, int, int, int, int, str] | None:
+def unpack_tcp_segment(src_ip: str, dst_ip:str, segment: bytes) -> TCPSegment | None:
+    """
+    Lee los datos de un segmento TCP en formato de bytes, compara el lo compara con 
+    el checksum y extrae los siguientes datos en este orden:
+     - Puerto fuente
+     - Puerto de destino
+     - Número de secuencia
+     - Número de ACK
+     - TCP Flags
+     - Tamaño de la ventana
+     - Datos del paquete
+    """
+
     header_no_checksum = segment[:16]
-
     pseudo_header = build_pseudo_header(src_ip, dst_ip, len(segment))
+    computed_checksum = checksum(pseudo_header + header_no_checksum
+                                 + (0).to_bytes(2) + segment[18:])
 
     recieved_checksum = int.from_bytes(segment[16:18])
-    computed_checksum = checksum(pseudo_header + header_no_checksum + (0).to_bytes(2) + segment[18:])
-    
-    if __debug__: 
-        print(f"recieved_checksum: {recieved_checksum}")
-        print(f"computed_checksum: {computed_checksum}")
 
     if (recieved_checksum != computed_checksum):
+        if __debug__:
+            print(f"recieved_checksum: {recieved_checksum}")
+            print(f"computed_checksum: {computed_checksum}")
         return None
 
-    (src_port, __, sec_num, ack_num,
-     data_off, flags, window) = struct.unpack("!HHIIBBHHH", header_no_checksum)
+    (src_port, dst_port,
+    seq_num, ack_num,
+    data_off, flags, window) = struct.unpack("!HHIIBBH", header_no_checksum)
 
     data = segment[(data_off >> 4):].decode()
 
-    return (src_port, sec_num, ack_num, flags, window, data)
+    if __debug__:
+        print(f"seq_num: {seq_num}")
+        print(f"ack_num: {ack_num}")
+        print(f"flags: {flags_to_str(flags)}")
+        print(f"data: {data}")
 
+    return TCPSegment(src_port, dst_port, seq_num, ack_num, flags, window, data)
 
-def create_udp_socket(ip: str, port: int) -> socket.SocketType:
-    soc = socket.socket(family = socket.AF_INET,
-                        type = socket.SOCK_DGRAM)
-    soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    soc.bind((ip, port))
-    return soc
 
 class MySocket:
     def __init__(self, ip: str, port: int) -> None:
-        self.socket: socket.SocketType = create_udp_socket(ip, port)
+        self.ip = ip
+        self.port = port
+
+        self.socket: socket.SocketType = socket.socket(
+            family = socket.AF_INET, type = socket.SOCK_DGRAM)
+        self.socket.bind((ip, port))
 
     def wait_connect(self):
-        _ = self.socket.recv(1024)
+        segment, addr = self.socket.recvfrom(BUFF_SIZE)
+        print("Paquete recibido")
 
+        segment_data = unpack_tcp_segment(addr[0], self.ip, segment)
+
+        if segment_data == None:
+            print("Paquete botado")
+            return
+
+        elif segment_data.flags & SYN:
+            print("SYN recibido")
+
+        send_segment = pack_tcp_segment(self.ip, addr[0], 
+                                   self.port, segment_data.src_port,
+                                   random.randrange(0, 1 << 32), 
+                                   segment_data.seq_num + 1,
+                                   SYN | ACK, BUFF_SIZE, '')
+
+        _ = self.socket.sendto(send_segment, (addr, segment_data.src_port))
+        print("SYN + ACK enviado")
+
+        
     def try_connect(self, ip: str, port: int) -> None:
-        byte_n = self.socket.sendto(syn1.encode(), (ip, port))
+        seq_num = random.randrange(0, 1 << 32)
 
-        if byte_n ==
+        segment = pack_tcp_segment(self.ip, ip, self.port, port,
+                                   seq_num, 0,
+                                   SYN, BUFF_SIZE, '')
+
+        _ = self.socket.sendto(segment, (ip, port))
+        print("SYN enviado")
+
+        segment, (ip, port) = self.socket.recvfrom(BUFF_SIZE)
+        print("respuesta recibida")
+
+        segment_data = unpack_tcp_segment(ip, self.ip, segment)
+
+        if segment_data == None:
+            print("Paquete botado")
+            return
+
+        if (segment_data.flags & SYN) and (segment_data.flags & ACK)\
+            and segment_data.ack_num == seq_num + 1:
+            print("SYN + ACK recibido")
+
+
 
 def conectar(ip: str | None = None, port: int | None = None) -> MySocket:
     match (ip, port):
