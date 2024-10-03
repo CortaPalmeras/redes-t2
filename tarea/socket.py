@@ -1,9 +1,15 @@
+from doctest import debug
 import socket
 import typing
 import random
 
-from .tcp import TCPSegment, pack_tcp_segment, unpack_tcp_segment, flags_to_str
+from . import tcp
 from .const import *
+
+
+class MySocketError(Exception):
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
 
 class MySocket:
     def __init__(self, ip: str, port: int) -> None:
@@ -12,17 +18,40 @@ class MySocket:
 
         self.socket: socket.SocketType = socket.socket(
             family = socket.AF_INET, type = socket.SOCK_DGRAM)
+
+        self.socket.settimeout(DEFAULT_TIMEOUT)
         self.socket.bind((ip, port))
 
-        self.cwnd = BUFF_SIZE
+        self.con_ip = None
+        self.con_port = 0
 
-    def recieve_segment(self) -> TCPSegment:
+        self.seq_num = -1
+        self.ack_num = -1
+
+
+    def send_segment(self, ip: str, port:int, seq_num: int, 
+                     ack_num: int, flags:int, data: str) -> int:
+        segment = tcp.pack_segment(self.ip, ip,
+                                   self.port, port,
+                                   seq_num, ack_num,
+                                   flags, BUFF_SIZE, data)
+
+        if __debug__:
+            print("Paquete enviado")
+            print(f"  src_port: {self.port}")
+            print(f"  dst_port: {port}")
+            print(f"  seq_num: {seq_num}")
+            print(f"  ack_num: {ack_num}")
+            print(f"  flags: {tcp.flags_to_str(flags)}") 
+        return self.socket.sendto(segment, (ip, port))
+
+    def recieve_segment(self) -> tcp.Segment:
         while True:
-            recieved = self.socket.recvfrom(self.cwnd)
+            recieved = self.socket.recvfrom(BUFF_SIZE)
             segment_raw = recieved[0]
             ip = typing.cast(str, recieved[1][0])
 
-            segment = unpack_tcp_segment(ip, self.ip, segment_raw)
+            segment = tcp.unpack_segment(ip, self.ip, segment_raw)
 
             if segment == None:
                 if __debug__:
@@ -30,67 +59,160 @@ class MySocket:
 
             else:
                 if __debug__:
-                    print("Paquete recibido--- ")
+                    print("Paquete recibido")
                     print(f"  src_port: {segment.src_port}") 
                     print(f"  dst_port: {segment.dst_port}")
                     print(f"  seq_num: {segment.seq_num}")
                     print(f"  ack_num: {segment.ack_num}")
-                    print(f"  flags: {flags_to_str(segment.flags)}") 
-                    print(f"  cwnd: {segment.cwnd}")
-                    print(f"  data: {segment.data}")
-                    print("Fin de los datos")
-
+                    print(f"  flags: {tcp.flags_to_str(segment.flags)}") 
                 return segment
 
-    def send_segment(self, ip: str, port:int, seq_num: int, 
-                     ack_num: int, flags:int, data: str) -> int:
-        segment = pack_tcp_segment(self.ip, ip,
-                                   self.port, port,
-                                   seq_num, ack_num,
-                                   flags, self.cwnd, data)
+    def try_connection(self, ip: str, port: int) -> None:
+        if self.con_ip != None:
+            raise MySocketError(f"No se puede llamar a '{self.try_connection.__name__}' con un socket conectado")
 
-        print(f"{flags_to_str(flags)} enviado")
-        return self.socket.sendto(segment, (ip, port))
+        while True:
+            seq_num = random.randrange(0, 1 << 32)
 
-    def wait_connect(self) -> None:
-        print("Esperando conección")
+            segment = self.send_segment(ip, port, seq_num, 0, SYN, '')
 
-        segment = self.recieve_segment()
-        if segment.flags != SYN:
-            print("Flags invalidas")
-            return
+            try:
+                segment = self.recieve_segment()
+            except TimeoutError:
+                continue
 
-        seq_num = random.randrange(0, 1 << 32)
-        _ = self.send_segment(segment.src_ip, segment.src_port, 
-                              seq_num, segment.seq_num + 1, SYN | ACK, '')
+            if segment.flags != (SYN | ACK) \
+                or segment.ack_num != seq_num + 1:
+                continue
 
-        segment = self.recieve_segment()
-        if segment.flags != ACK:
-            print("Flags invalidas")
-            return
+            self.seq_num = seq_num + 1
+            self.ack_num = segment.seq_num + 1
+            self.con_ip = segment.src_ip
+            self.con_port = segment.src_port
 
-        segment = self.recieve_segment()
-        if segment.flags != ACK:
-            print("Flags invalidas")
-            return
+            _ = self.send_segment(ip, port, self.seq_num, self.ack_num, ACK, '')
 
-        print(segment.data)
+            if __debug__:
+                print("Conección establecida")
+            break
+
+    def wait_connection(self) -> None:
+        if self.con_ip != None:
+            raise MySocketError(f"No se puede llamar a '{self.wait_connection.__name__}' con un socket conectado")
+
+        tries: dict[tuple[str, int], tuple[int, int]] = dict()
+
+        while True:
+            try:
+                segment = self.recieve_segment()
+            except TimeoutError:
+                continue
+
+            if segment.flags == SYN:
+                # si recibo SYN devuelvo SYN + ACK y lo añado a la lista de intentos
+                seq_num = random.randrange(0, 1 << 32)
+                ack_num = segment.seq_num + 1
+                _ = self.send_segment(segment.src_ip, segment.src_port, seq_num,
+                                      ack_num, SYN | ACK, '')
+
+                tries[(segment.src_ip, segment.src_port)] = (seq_num + 1, ack_num)
+
+            elif segment.flags & ACK \
+                and (segment.src_ip, segment.src_port) in tries.keys():
+                # si recibo un ACK, la fuente debe estár en la lista de intentos
+
+                seq_num, ack_num = tries[segment.src_ip, segment.src_port]
+
+                if segment.seq_num != ack_num:
+                    # si el numero de segmento no calza con el esperado 
+                    # se envia un ack vacío con el numero esperado
+                    _ = self.send_segment(segment.src_ip, segment.src_port,
+                                          seq_num, ack_num, ACK, "")
+                    continue
+
+                self.con_ip = segment.src_ip
+                self.con_port = segment.src_port
+                self.seq_num = seq_num
+                self.ack_num = ack_num
+
+                break
+
+        if __debug__:
+            print("Conección establecida")
 
 
-    def try_connect(self, ip: str, port: int) -> None:
-        print("intentando conectar")
+    def recieve_all(self) -> str:
+        if self.con_ip == None:
+            raise MySocketError(f"No se puede llamar a '{self.recieve_all.__name__}' con un socket desconectado")
 
-        seq_num = random.randrange(0, 1 << 32)
-        segment = self.send_segment(ip, port, seq_num, 0, SYN, '')
+        res: list[str] = list()
 
-        segment = self.recieve_segment()
-        if segment.flags != (SYN | ACK) and segment.ack_num != seq_num + 1:
-            print("Flags invalidas")
-            return
+        while True:
+            try:
+                segment = self.recieve_segment()
+            except TimeoutError:
+                continue
 
-        seq_num += 1
-        _ = self.send_segment(ip, port, seq_num, segment.seq_num + 1, ACK, '')
+            if segment.src_ip != self.con_ip \
+                or segment.src_port != self.con_port:
+                if __debug__:
+                    print("Dirección incorrecta")
+                    print(f"segment: {segment.src_ip}, self: {self.con_ip}")
+                    print(f"segment: {segment.src_port}, self: {self.port}")
+                continue
 
-        seq_num += 1
-        _ = self.send_segment(ip, port, seq_num, segment.seq_num + 1, ACK, 'Conección establecida!')
-        print("Conección establecida!")
+            if segment.seq_num != self.ack_num:
+                if __debug__: print("numero de secuencia incorrecto")
+                _ = self.send_segment(self.con_ip, self.con_port,
+                                      self.seq_num, self.ack_num, ACK, "")
+                continue
+
+            self.ack_num += 1
+            _ = self.send_segment(self.con_ip, self.con_port,
+                                  self.seq_num, self.ack_num, ACK, "")
+
+            if segment.data == '':
+                return ''.join(res)
+            else:
+                res.append(segment.data)
+
+
+
+    def send_all(self, msg: str):
+        if self.con_ip == None:
+            raise MySocketError(f"Can't call '{self.send_all.__name__}' with a disconnected socket")
+
+        part_len = BUFF_SIZE - tcp.HEADER_SIZE_BITS
+        parts: list[str] = [msg[i * part_len: (i+1) * part_len] for i in range((len(msg) // part_len) + 1)]
+        parts.append('')
+        resend_final = 0
+
+        for part in parts:
+            while True:
+                _ = self.send_segment(self.con_ip, self.con_port, 
+                                      self.seq_num, self.ack_num, ACK, part)
+
+                try:
+                    segment = self.recieve_segment()
+                except TimeoutError:
+                    if __debug__: print("Reenvio por timeout")
+                    if part == '':
+                        resend_final += 1
+                        if resend_final > 100:
+                            break
+                    continue
+
+                if segment.src_ip != self.con_ip \
+                    or segment.src_port != self.con_port:
+                    if __debug__:
+                        print("Dirección incorrecta")
+                        print(f"segment: {segment.src_ip}, self: {self.con_ip}")
+                        print(f"segment: {segment.src_port}, self: {self.port}")
+                    continue
+
+                if segment.ack_num == self.seq_num + 1:
+                    self.seq_num += 1
+                    break
+
+
+

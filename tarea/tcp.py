@@ -5,6 +5,10 @@ import typing
 
 from .const import *
 
+HEADER_SIZE_WORDS = 5
+HEADER_SIZE_BYTES = HEADER_SIZE_WORDS * 4
+HEADER_SIZE_BITS = HEADER_SIZE_BYTES * 8
+
 def flags_to_str(flags: int) -> str:
     res = ''
     if flags & CWR:
@@ -29,7 +33,7 @@ def flags_to_str(flags: int) -> str:
 
     return res
 
-class TCPSegment(typing.NamedTuple):
+class Segment(typing.NamedTuple):
     src_ip: str
     dst_ip: str
     src_port: int
@@ -37,7 +41,7 @@ class TCPSegment(typing.NamedTuple):
     seq_num: int
     ack_num: int
     flags: int
-    cwnd: int
+    window: int
     data: str
 
 def checksum(data: bytes) -> int:
@@ -60,10 +64,10 @@ def build_pseudo_header(src_ip: str, dst_ip: str, size: int):
                        socket.inet_aton(dst_ip),
                        0, socket.IPPROTO_TCP, size)
 
-def pack_tcp_segment(src_ip: str, dst_ip: str,
-                     src_port: int, dst_port: int, 
-                     seq_num: int, ack_num: int, 
-                     flags: int, cwnd: int, data: str) -> bytes:
+def pack_segment(src_ip: str, dst_ip: str,
+                 src_port: int, dst_port: int, 
+                 seq_num: int, ack_num: int, 
+                 flags: int, window: int, data: str) -> bytes:
     """
     Construye un segmento de TCP acorde a la especificación, sin incluir opciones.
     """
@@ -71,7 +75,7 @@ def pack_tcp_segment(src_ip: str, dst_ip: str,
                                      src_port, dst_port,
                                      seq_num,
                                      ack_num,
-                                     (5 << 4), flags, cwnd)
+                                     (5 << 4), flags, window)
 
     header = header_no_checksum + (0).to_bytes(4) # checksum y urgent pointer
 
@@ -86,12 +90,12 @@ def pack_tcp_segment(src_ip: str, dst_ip: str,
     return header + byte_data
 
 
-def unpack_tcp_segment(src_ip: str, dst_ip:str, segment: bytes) -> TCPSegment | None:
+def unpack_segment(src_ip: str, dst_ip:str, segment: bytes) -> Segment | None:
     """
     Lee los bytes de un segmento TCP, revisa que calce el checksum y extrae los datos
     del header.
     """
-    if len(segment) < 20:
+    if len(segment) < HEADER_SIZE_BYTES:
         return None
 
     header_no_checksum = segment[:16]
@@ -106,11 +110,11 @@ def unpack_tcp_segment(src_ip: str, dst_ip:str, segment: bytes) -> TCPSegment | 
 
     (src_port, dst_port,
     seq_num, ack_num,
-    data_off, flags, cwnd) = typing.cast(tuple[int,int,int,int,int,int,int], 
+    data_off, flags, window) = typing.cast(tuple[int,int,int,int,int,int,int], 
                                            struct.unpack("!HHIIBBH", header_no_checksum))
 
     data_off = data_off >> 4
     data = segment[(data_off) * 4:].decode()
 
-    return TCPSegment(src_ip, dst_ip, src_port, dst_port, seq_num, ack_num, flags, cwnd, data)
+    return Segment(src_ip, dst_ip, src_port, dst_port, seq_num, ack_num, flags, window, data)
 
