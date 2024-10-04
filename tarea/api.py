@@ -27,5 +27,5 @@ def enviar(socket: MySocket, msg: str):
 def recibir(socket: MySocket) -> str:
     return socket.recieve_all()
 
-def cerrar(socker):
-    pass
+def cerrar(socket: MySocket):
+    socket.end_connection()

@@ -1,4 +1,3 @@
-from doctest import debug
 import socket
 import typing
 import random
@@ -31,6 +30,10 @@ class MySocket:
 
     def send_segment(self, ip: str, port:int, seq_num: int, 
                      ack_num: int, flags:int, data: str) -> int:
+        ''' 
+        Función de conveniencia para empaquetar y enviar datos como un
+        segmento de TCP
+        '''
         segment = tcp.pack_segment(self.ip, ip,
                                    self.port, port,
                                    seq_num, ack_num,
@@ -46,6 +49,7 @@ class MySocket:
         return self.socket.sendto(segment, (ip, port))
 
     def recieve_segment(self) -> tcp.Segment:
+        ''' Función de conveniencia para recibir un segmento de TCP '''
         while True:
             recieved = self.socket.recvfrom(BUFF_SIZE)
             segment_raw = recieved[0]
@@ -68,6 +72,8 @@ class MySocket:
                 return segment
 
     def try_connection(self, ip: str, port: int) -> None:
+        ''' Hace que es socket intente conectarse a otro a traves de un 3-way handhsake '''
+
         if self.con_ip != None:
             raise MySocketError(f"No se puede llamar a '{self.try_connection.__name__}' con un socket conectado")
 
@@ -97,6 +103,7 @@ class MySocket:
             break
 
     def wait_connection(self) -> None:
+        ''' Hace que es socket espere una conección, realiza un 3-way handhsake '''
         if self.con_ip != None:
             raise MySocketError(f"No se puede llamar a '{self.wait_connection.__name__}' con un socket conectado")
 
@@ -142,6 +149,7 @@ class MySocket:
 
 
     def recieve_all(self) -> str:
+        ''' El socket recibe datos y los concatena hasta recibir una string vacía '''
         if self.con_ip == None:
             raise MySocketError(f"No se puede llamar a '{self.recieve_all.__name__}' con un socket desconectado")
 
@@ -161,6 +169,9 @@ class MySocket:
                     print(f"segment: {segment.src_port}, self: {self.port}")
                 continue
 
+            if segment.flags & FIN:
+                return ''.join(res)
+
             if segment.seq_num != self.ack_num:
                 if __debug__: print("numero de secuencia incorrecto")
                 _ = self.send_segment(self.con_ip, self.con_port,
@@ -179,6 +190,10 @@ class MySocket:
 
 
     def send_all(self, msg: str):
+        ''' 
+        El mensaje se separa en varios segmentos y se envían de manera segura utilizando
+        stop-and-wait, al terminar envía una string vacía
+        '''
         if self.con_ip == None:
             raise MySocketError(f"Can't call '{self.send_all.__name__}' with a disconnected socket")
 
@@ -210,9 +225,30 @@ class MySocket:
                         print(f"segment: {segment.src_port}, self: {self.port}")
                     continue
 
+                if segment.flags & FIN:
+                    break
+
                 if segment.ack_num == self.seq_num + 1:
                     self.seq_num += 1
                     break
+
+    def end_connection(self) -> None:
+        ''' 
+        Se cierra la conección
+        '''
+        if self.con_ip == None:
+            raise MySocketError(f"No se puede llamar a '{self.end_connection.__name__}' con un socket desconectado")
+
+        while True:
+            _ = self.send_segment(self.con_ip, self.con_port, 
+                                0, 0, FIN, '')
+            try:
+                segment = self.recieve_segment()
+            except TimeoutError:
+                continue
+            
+            if segment.flags & FIN:
+                break
 
 
 

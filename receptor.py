@@ -11,4 +11,4 @@ with open(sys.argv[1], 'w') as file:
     print(f"{file.write(tarea.recibir(soc))} bytes escritos en el archivo {sys.argv[1]}")
 
 
-soc.socket.close()
+tarea.cerrar(soc)

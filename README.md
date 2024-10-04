@@ -30,7 +30,7 @@ la flag `-OO` se puede quitar si se desea ver los logs completos, pero advierto
 que es un monton de texto:
 ```bash
 python3 -OO receptor.py out.txt
-python3 -OO transmisor.py in.txt
+python3 -OO emisor.py in.txt
 ```
 
 Para comparar el archivo de entrada con el de salida se puede utilizar el
@@ -44,14 +44,6 @@ diff in.txt out.txt
 Finalmente, para retornar la red a su estado original se puede usar:
 ```bash
 sudo tc qdisc delete dev lo root netem
-```
-
-## El codigo
-
-La tarea tiene esta estructura:
-
-```
-
 ```
 
 

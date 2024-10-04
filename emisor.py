@@ -12,4 +12,5 @@ soc = tarea.conectar(tarea.LOCALHOST, tarea.DEFAULT_SERVER_PORT)
 
 tarea.enviar(soc, msg)
 
-soc.socket.close()
+tarea.cerrar(soc)
+
